@@ -4,12 +4,11 @@ import Header from "./components/Header";
 import Swap from "./pages/Swap";
 import Pools from "./pages/Pools";
 import Farms from "./pages/Farms";
-import { aftermathInit } from "./config/aftermath";
+import { aftermathInit } from "./config/aftermath"; // <-- import from your updated aftermath.ts
 
 function App() {
   const [sdkReady, setSdkReady] = useState(false);
 
-  // Initialize the Aftermath SDK once on app load
   useEffect(() => {
     aftermathInit()
       .then(() => {

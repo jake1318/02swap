@@ -1,16 +1,36 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { useWallet } from "@suiet/wallet-kit";
 
 export default function Swap() {
   const { connected, account, signAndExecuteTransactionBlock } = useWallet();
+
+  // Store the full coin list + adjacency map from the backend
+  const [coinList, setCoinList] = useState<any[]>([]);
+  const [adjacencyMap, setAdjacencyMap] = useState<Record<string, string[]>>(
+    {}
+  );
+
+  // Selections
   const [fromCoinType, setFromCoinType] = useState("0x2::sui::SUI");
-  const [toCoinType, setToCoinType] = useState("0x6::otherCoin::COIN");
+  const [toCoinType, setToCoinType] = useState("");
   const [amount, setAmount] = useState("0");
   const [estimatedOut, setEstimatedOut] = useState("0");
   const [loadingRoute, setLoadingRoute] = useState(false);
 
+  // Fetch tradeable coins once
   useEffect(() => {
-    if (connected && parseFloat(amount) > 0) {
+    fetch("http://localhost:3001/api/tradeable-coins")
+      .then((res) => res.json())
+      .then((data) => {
+        setCoinList(data.coins || []);
+        setAdjacencyMap(data.adjacencyMap || {});
+      })
+      .catch((err) => console.error("Failed to load tradeable coins:", err));
+  }, []);
+
+  // Whenever from/to/amount changes, update the estimation
+  useEffect(() => {
+    if (connected && parseFloat(amount) > 0 && fromCoinType && toCoinType) {
       updateEstimation();
     } else {
       setEstimatedOut("0");
@@ -18,39 +38,45 @@ export default function Swap() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fromCoinType, toCoinType, amount, connected]);
 
+  // Filter 'To' coins based on adjacency
+  const validToCoins = useMemo(() => {
+    if (!fromCoinType || !adjacencyMap[fromCoinType]) return [];
+    const neighbors = adjacencyMap[fromCoinType];
+    // neighbors is an array of coin types that share a pool
+    return neighbors
+      .map((type) => coinList.find((c) => c.type === type))
+      .filter(Boolean);
+  }, [fromCoinType, adjacencyMap, coinList]);
+
   async function updateEstimation() {
     if (!connected) return;
     try {
       setLoadingRoute(true);
-
-      // Convert amount to the smallest unit (9 decimals as example)
       const coinInAmount = BigInt(
         Math.floor(parseFloat(amount) * 1e9)
       ).toString();
       const payload = {
         coinInType: fromCoinType,
         coinOutType: toCoinType,
-        coinInAmount, // as string
+        coinInAmount,
       };
 
-      // Call our backend for the trade route
-      const response = await fetch("http://localhost:3001/api/swap/quote", {
+      const resp = await fetch("http://localhost:3001/api/swap/quote", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      if (!response.ok) {
-        console.error("Estimation response not OK:", response.status);
+      if (!resp.ok) {
+        console.error("Estimation response not OK:", resp.status);
         setEstimatedOut("0");
         return;
       }
 
-      const route = await response.json();
+      const route = await resp.json();
       if (!route || !route.coinOutAmount) {
         setEstimatedOut("0");
       } else {
-        // route.coinOutAmount is typically a BigInt string
         const estimatedOutNum = Number(route.coinOutAmount) / 1e9;
         setEstimatedOut(estimatedOutNum.toFixed(6));
       }
@@ -67,7 +93,6 @@ export default function Swap() {
       return alert("Wallet not connected.");
     }
     try {
-      // 1) Fetch the route again (or you could reuse the route from state).
       const coinInAmount = BigInt(
         Math.floor(parseFloat(amount) * 1e9)
       ).toString();
@@ -76,46 +101,40 @@ export default function Swap() {
         coinOutType: toCoinType,
         coinInAmount,
       };
-      const routeResponse = await fetch(
-        "http://localhost:3001/api/swap/quote",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(routePayload),
-        }
-      );
 
-      if (!routeResponse.ok) {
-        alert("Failed to get trade route. Check server logs.");
+      const routeResp = await fetch("http://localhost:3001/api/swap/quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(routePayload),
+      });
+
+      if (!routeResp.ok) {
+        alert("Failed to get trade route.");
         return;
       }
-      const route = await routeResponse.json();
+      const route = await routeResp.json();
       if (!route) {
         return alert("No route found for this pair.");
       }
 
-      // 2) Build a transaction block on the server, specifying slippage and wallet address
       const txPayload = {
         walletAddress: account.address,
         completeRoute: route,
-        slippage: 0.005, // 0.5% slippage
+        slippage: 0.005,
       };
-      const txResponse = await fetch(
-        "http://localhost:3001/api/swap/transaction",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(txPayload),
-        }
-      );
 
-      if (!txResponse.ok) {
+      const txResp = await fetch("http://localhost:3001/api/swap/transaction", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(txPayload),
+      });
+
+      if (!txResp.ok) {
         alert("Failed to get transaction block.");
         return;
       }
-      const txBlock = await txResponse.json();
+      const txBlock = await txResp.json();
 
-      // 3) Use the connected wallet to sign and execute
       const result = await signAndExecuteTransactionBlock({
         transactionBlock: txBlock,
       });
@@ -131,26 +150,44 @@ export default function Swap() {
     <div style={{ padding: "1rem" }}>
       <h3>Swap</h3>
 
+      {/* FROM Coin */}
       <div style={{ marginBottom: "0.5rem" }}>
         <label>From Coin Type: </label>
-        <input
-          type="text"
+        <select
           value={fromCoinType}
-          onChange={(e) => setFromCoinType(e.target.value)}
+          onChange={(e) => {
+            setFromCoinType(e.target.value);
+            setToCoinType(""); // reset if from changed
+          }}
           style={{ width: "30rem" }}
-        />
+        >
+          <option value="">-- Select a coin --</option>
+          {coinList.map((coin) => (
+            <option key={coin.type} value={coin.type}>
+              {coin.name} ({coin.type})
+            </option>
+          ))}
+        </select>
       </div>
 
+      {/* TO Coin */}
       <div style={{ marginBottom: "0.5rem" }}>
         <label>To Coin Type: </label>
-        <input
-          type="text"
+        <select
           value={toCoinType}
           onChange={(e) => setToCoinType(e.target.value)}
           style={{ width: "30rem" }}
-        />
+        >
+          <option value="">-- Select a coin --</option>
+          {validToCoins.map((coin: any) => (
+            <option key={coin.type} value={coin.type}>
+              {coin.name} ({coin.type})
+            </option>
+          ))}
+        </select>
       </div>
 
+      {/* Amount */}
       <div style={{ marginBottom: "0.5rem" }}>
         <label>Amount In: </label>
         <input
@@ -162,15 +199,23 @@ export default function Swap() {
         />
       </div>
 
+      {/* Estimate Out */}
       <div style={{ marginBottom: "0.5rem" }}>
-        <button onClick={updateEstimation} disabled={loadingRoute}>
+        <button
+          onClick={updateEstimation}
+          disabled={loadingRoute || !fromCoinType || !toCoinType}
+        >
           {loadingRoute ? "Fetching Route..." : "Estimate Out"}
         </button>
         {"   "}
         Estimated Out: {estimatedOut}
       </div>
 
-      <button onClick={handleSwap} disabled={!connected}>
+      {/* Execute Swap */}
+      <button
+        onClick={handleSwap}
+        disabled={!connected || !fromCoinType || !toCoinType}
+      >
         Execute Swap
       </button>
     </div>
